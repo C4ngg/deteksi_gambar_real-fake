@@ -2,6 +2,12 @@
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const ALLOWED_TYPES = ["image/png", "image/jpg", "image/jpeg", "image/webp", "image/bmp"];
 
+// Alamat backend FastAPI. Bisa dioverride lewat window.API_BASE_URL
+// sebelum logika.js dimuat, misalnya saat deploy ke domain lain.
+const API_BASE_URL = (window.API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+const PREDICT_TIMEOUT_MS = 30000;
+const HEALTH_TIMEOUT_MS = 4000;
+
 // 2. Elemen halaman
 const elements = {
   dropzone: document.getElementById("dropzone"),
@@ -10,6 +16,8 @@ const elements = {
   preview: document.getElementById("preview"),
   fileInfo: document.getElementById("fileInfo"),
   error: document.getElementById("error"),
+  serverStatus: document.getElementById("serverStatus"),
+  serverStatusText: document.getElementById("serverStatusText"),
   analyzeButton: document.getElementById("analyzeBtn"),
   resetButton: document.getElementById("resetBtn"),
   loading: document.getElementById("loading"),
@@ -41,6 +49,45 @@ function show(element) {
 
 function hide(element) {
   element.classList.add("hidden");
+}
+
+// Status koneksi ke backend, ditampilkan di pojok kartu.
+function setServerStatus(state, text) {
+  elements.serverStatus.className = `ready-state is-${state}`;
+  elements.serverStatusText.textContent = text;
+  elements.serverStatus.title = `Server: ${API_BASE_URL}`;
+}
+
+async function checkServer() {
+  setServerStatus("checking", "MEMERIKSA");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/health`, {
+      signal: controller.signal,
+      headers: { Accept: "application/json" }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server merespons dengan status ${response.status}.`);
+    }
+
+    const data = await response.json();
+
+    if (!data || data.status !== "ok") {
+      throw new Error("Server belum siap.");
+    }
+
+    setServerStatus("online", "SIAP");
+    return true;
+  } catch (error) {
+    setServerStatus("offline", "OFFLINE");
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function showError(message) {
@@ -154,11 +201,80 @@ function selectFile(file) {
 }
 
 // 7. Bagian deteksi
-// Tempatnya model/API
+// Backend FastAPI mengembalikan { label, confidence, prob_fake, prob_real, ... }.
+async function readErrorDetail(response) {
+  try {
+    const data = await response.json();
+
+    if (typeof data.detail === "string") {
+      return data.detail;
+    }
+
+    if (Array.isArray(data.detail) && data.detail[0] && data.detail[0].msg) {
+      return `Permintaan ditolak: ${data.detail[0].msg}`;
+    }
+  } catch (error) {
+    // Respons bukan JSON, pakai pesan umum di bawah.
+  }
+
+  return `Server mengembalikan kesalahan (${response.status}).`;
+}
+
 async function detectImage(file) {
-  throw new Error(
-    "Model deteksinya belum terhubung di 'detectImage()'🗿."
-  );
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PREDICT_TIMEOUT_MS);
+
+  let response;
+
+  try {
+    response = await fetch(`${API_BASE_URL}/predict`, {
+      method: "POST",
+      body: formData,
+      signal: controller.signal
+    });
+  } catch (error) {
+    setServerStatus("offline", "OFFLINE");
+
+    if (error.name === "AbortError") {
+      throw new Error("Analisis melebihi batas waktu. Coba lagi dengan gambar yang lebih kecil.");
+    }
+
+    throw new Error(
+      `Tidak dapat terhubung ke server deteksi di ${API_BASE_URL}. Pastikan backend sudah berjalan.`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    if (response.status === 503) {
+      setServerStatus("offline", "OFFLINE");
+    } else {
+      setServerStatus("online", "SIAP");
+    }
+
+    throw new Error(await readErrorDetail(response));
+  }
+
+  const prediction = await response.json().catch(function () {
+    return null;
+  });
+
+  if (
+    !prediction ||
+    (prediction.label !== "real" && prediction.label !== "fake") ||
+    !Number.isFinite(prediction.confidence)
+  ) {
+    throw new Error("Format hasil deteksi dari server tidak valid.");
+  }
+
+  setServerStatus("online", "SIAP");
+
+  // Hanya kontrak yang dipakai showResult yang diteruskan.
+  return { label: prediction.label, confidence: prediction.confidence };
 }
 
 function showResult(prediction) {
@@ -257,3 +373,7 @@ elements.dropzone.addEventListener("drop", function (event) {
 
 elements.analyzeButton.addEventListener("click", analyzeSelectedImage);
 elements.resetButton.addEventListener("click", resetPage);
+
+// 9. Cek ketersediaan backend saat halaman dibuka
+setServerStatus("checking", "MEMERIKSA");
+checkServer();

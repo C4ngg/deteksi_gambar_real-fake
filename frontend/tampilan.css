@@ -172,6 +172,24 @@ h1 .title-dot { color: var(--green); }
   background: currentColor;
 }
 
+.ready-state.is-checking {
+  color: #8a5a00;
+  background: #fff4d6;
+}
+
+.ready-state.is-checking .ready-dot {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.ready-state.is-offline {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+@keyframes pulse {
+  50% { opacity: 0.25; }
+}
+
 .dropzone {
   position: relative;
   display: flex;

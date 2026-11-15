@@ -36,7 +36,7 @@ Dokumentasi interaktif: <http://127.0.0.1:8000/docs>
 | `DEVICE` | `cuda` bila tersedia | `cpu` atau `cuda` |
 | `FAKE_THRESHOLD` | `0.5` | Ambang `prob_fake` untuk label fake |
 | `MAX_UPLOAD_MB` | `10` | Batas ukuran upload |
-| `CORS_ORIGINS` | `localhost:5500, localhost:8000` | Origin yang diizinkan (dipisah koma) |
+| `CORS_ORIGINS` | `localhost:5500, localhost:8000, null` | Origin yang diizinkan (dipisah koma). `null` untuk halaman `file://` |
 
 ## Endpoint
 
