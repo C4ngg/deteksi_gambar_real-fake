@@ -288,8 +288,8 @@ function showResult(prediction) {
     throw new Error("Format hasil deteksi tidak valid.");
   }
   
-  // Fungsi perlu mengembalikan: { label: "real" atau "fake", confidence: angka 0-100 }.
-  const confidence = Math.min(100, Math.max(0, Math.round(prediction.confidence)));
+  // Fungsi perlu mengembalikan: { label: "real" atau "fake", confidence: angka 0-99 }.
+  const confidence = Math.min(99, Math.max(0, Math.round(prediction.confidence)));
   const isReal = prediction.label === "real";
 
   elements.resultBadge.className = `badge ${prediction.label}`;
