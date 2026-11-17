@@ -20,6 +20,9 @@ berbeda, atur `MODEL_PATH`.
 Dari root repo:
 ```powershell
 uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Kalau error, Jalankan ini
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Atau dari folder `backend/`:
