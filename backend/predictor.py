@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 import os
 import time
+import math
+
 from pathlib import Path
 from typing import Any
+
 
 import timm
 import torch
 from PIL import Image
-from timm.data import create_transform, resolve_data_config
+import torchvision.transforms as T
+from timm.data import resolve_data_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MODEL_PATH = REPO_ROOT / "Swin-B" / "best.pt"
@@ -66,12 +70,23 @@ class FakeImagePredictor:
                 "Letakkan best.pt di folder Swin-B/ atau atur environment variable MODEL_PATH."
             )
 
-        if not 0.0 < (fake_threshold or 0.5) < 1.0:
+
+        raw_threshold = (
+            fake_threshold
+            if fake_threshold is not None
+            else os.getenv("FAKE_THRESHOLD", "0.5")
+        )
+
+        try:
+            self.fake_threshold = float(raw_threshold)
+        except (TypeError, ValueError):
+            raise ValueError("FAKE_THRESHOLD harus berupa angka.")
+
+        if not math.isfinite(self.fake_threshold) or not (
+            0.0 < self.fake_threshold < 1.0
+        ):
             raise ValueError("FAKE_THRESHOLD harus berada di antara 0 dan 1.")
 
-        self.fake_threshold = float(
-            fake_threshold if fake_threshold is not None else os.getenv("FAKE_THRESHOLD", "0.5")
-        )
         self.device = torch.device(
             device or os.getenv("DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
         )
@@ -82,13 +97,27 @@ class FakeImagePredictor:
         self.version = f"swin-b-epoch{best_epoch}" if best_epoch else "swin-b"
 
         self.model = self._load_model()
-        self.transform = create_transform(
-            **resolve_data_config({}, model=self.model), is_training=False
-        )
+
+        # Mengambil mean dan std yang sama dengan konfigurasi training
+        dcfg = resolve_data_config({}, model=self.model)
+
+        # Menyamakan preprocessing dengan notebook training
+        self.transform = T.Compose([
+            T.Resize(256),
+            T.CenterCrop(224),
+            T.ToTensor(),
+            T.Normalize(
+                mean=dcfg["mean"],
+                std=dcfg["std"]
+            )
+        ])
 
     def _load_model(self) -> torch.nn.Module:
         model = timm.create_model(
-            MODEL_NAME, pretrained=False, num_classes=len(self.class_names)
+            MODEL_NAME,
+            pretrained=False,
+            num_classes=len(self.class_names),
+            drop_path_rate=0.1
         )
 
         # weights_only=True: hanya tensor yang diizinkan, aman dari eksekusi kode
@@ -106,9 +135,12 @@ class FakeImagePredictor:
         tensor = self.transform(image.convert("RGB")).unsqueeze(0).to(self.device)
 
         started = time.perf_counter()
-        with torch.inference_mode():
+        use_amp = self.device.type == "cuda"
+        amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+
+        with torch.inference_mode(), torch.autocast(device_type=self.device.type, dtype=amp_dtype, enabled=use_amp):
             logits = self.model(tensor)
-            probabilities = torch.softmax(logits, dim=1)[0]
+            probabilities = torch.softmax(logits.float(), dim=1)[0]
         elapsed_ms = (time.perf_counter() - started) * 1000
 
         prob_fake = float(probabilities[FAKE_INDEX])

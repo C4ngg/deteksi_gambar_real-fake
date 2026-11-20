@@ -274,18 +274,25 @@ async function detectImage(file) {
   setServerStatus("online", "SIAP");
 
   // Hanya kontrak yang dipakai showResult yang diteruskan.
-  return { label: prediction.label, confidence: prediction.confidence };
+  return {
+    label: prediction.label,
+    confidence: prediction.confidence,
+    prob_fake: prediction.prob_fake,
+    prob_real: prediction.prob_real
+};
 }
 
 function showResult(prediction) {
   const validLabels = ["real", "fake"];
   
   if (
-    !prediction ||
-    !validLabels.includes(prediction.label) ||
-    !Number.isFinite(prediction.confidence)
+      !prediction ||
+      !["real", "fake"].includes(prediction.label) ||
+      !Number.isFinite(prediction.confidence) ||
+      !Number.isFinite(prediction.prob_fake) ||
+      !Number.isFinite(prediction.prob_real)
   ) {
-    throw new Error("Format hasil deteksi tidak valid.");
+      throw new Error("Format hasil deteksi dari server tidak valid.");
   }
   
   // Fungsi perlu mengembalikan: { label: "real" atau "fake", confidence: angka 0-99 }.
