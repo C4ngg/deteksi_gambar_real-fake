@@ -3,6 +3,8 @@ Swin-B/
 # Python
 __pycache__/
 *.py[cod]
+*.pth
+*.pt
 .venv/
 venv/
 .pytest_cache/

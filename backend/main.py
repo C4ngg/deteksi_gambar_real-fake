@@ -34,7 +34,7 @@ Image.MAX_IMAGE_PIXELS = 40_000_000
 
 
 class PredictionResponse(BaseModel):
-    label: Literal["real", "fake"]
+    label: Literal["Real", "AI-generated"]
     confidence: float = Field(
         ..., ge=0, le=100, description="Keyakinan model terhadap label terpilih (persen)"
     )
@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Deteksi Gambar Real/Fake",
+    title="Deteksi Gambar Real/AI-generated",
     description="API inferensi model Swin-B untuk membedakan gambar asli dan hasil AI.",
     version="1.0.0",
     lifespan=lifespan,
@@ -83,7 +83,7 @@ app.add_middleware(
 @app.get("/")
 async def root() -> dict:
     return {
-        "name": "Deteksi Gambar Real/Fake API",
+        "name": "Deteksi Gambar Real/AI-generated API",
         "docs": "/docs",
         "endpoints": ["GET /health", "POST /predict"],
     }

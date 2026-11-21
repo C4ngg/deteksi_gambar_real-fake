@@ -265,8 +265,9 @@ async function detectImage(file) {
 
   if (
     !prediction ||
-    (prediction.label !== "real" && prediction.label !== "fake") ||
-    !Number.isFinite(prediction.confidence)
+    !["Real", "AI-generated"].includes(prediction.label) ||
+    !Number.isFinite(prediction.confidence) ||
+    !Number.isFinite(prediction.elapsed_ms)
   ) {
     throw new Error("Format hasil deteksi dari server tidak valid.");
   }
@@ -278,35 +279,36 @@ async function detectImage(file) {
     label: prediction.label,
     confidence: prediction.confidence,
     prob_fake: prediction.prob_fake,
-    prob_real: prediction.prob_real
-};
+    prob_real: prediction.prob_real,
+    elapsed_ms: prediction.elapsed_ms
+  };
 }
 
 function showResult(prediction) {
-  const validLabels = ["real", "fake"];
-  
   if (
-      !prediction ||
-      !["real", "fake"].includes(prediction.label) ||
-      !Number.isFinite(prediction.confidence) ||
-      !Number.isFinite(prediction.prob_fake) ||
-      !Number.isFinite(prediction.prob_real)
+    !prediction ||
+    !["Real", "AI-generated"].includes(prediction.label) ||
+    !Number.isFinite(prediction.confidence) ||
+    !Number.isFinite(prediction.prob_fake) ||
+    !Number.isFinite(prediction.prob_real) ||
+    !Number.isFinite(prediction.elapsed_ms)
   ) {
-      throw new Error("Format hasil deteksi dari server tidak valid.");
+    throw new Error("Format hasil deteksi dari server tidak valid.");
   }
-  
-  // Fungsi perlu mengembalikan: { label: "real" atau "fake", confidence: angka 0-99 }.
-  const confidence = Math.min(99, Math.max(0, Math.round(prediction.confidence)));
-  const isReal = prediction.label === "real";
 
-  elements.resultBadge.className = `badge ${prediction.label}`;
-  elements.resultBadge.textContent = isReal ? "REAL" : "FAKE";
+  const confidence = Math.min(100, Math.max(0, Math.round(prediction.confidence)));
+  const isReal = prediction.label === "Real";
+  const resultClass = isReal ? "real" : "fake";
+
+  elements.resultBadge.className = `badge ${resultClass}`;
+  elements.resultBadge.textContent = prediction.label;
   elements.resultText.textContent = isReal
     ? "Gambar terindikasi asli."
-    : "Gambar terindikasi palsu.";
-  elements.resultBar.className = `bar-fill ${prediction.label}`;
+    : "Gambar terindikasi dibuat oleh AI.";
+  elements.resultBar.className = `bar-fill ${resultClass}`;
   elements.resultBar.style.width = `${confidence}%`;
-  elements.resultNote.textContent = `Tingkat keyakinan model: ${confidence}%.`;
+  elements.resultNote.textContent =
+    `Tingkat keyakinan model: ${confidence}% • Waktu inferensi: ${prediction.elapsed_ms.toFixed(2)} ms.`;
 
   show(elements.result);
 }

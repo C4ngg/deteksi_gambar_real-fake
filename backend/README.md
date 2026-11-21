@@ -1,11 +1,11 @@
-# Backend API — Deteksi Gambar Real/Fake
+# Backend API — Deteksi Gambar Real/AI-generated
 
-Server FastAPI yang memuat `Swin-B/best.pt` dan menyediakan endpoint prediksi.
+Server FastAPI yang memuat `Swin-B/checkpoint_best.pth` dan menyediakan endpoint prediksi.
 
 ## Ringkasan model
 - Arsitektur: `swin_base_patch4_window7_224.ms_in22k_ft_in1k` (timm), 86,7M parameter
 - Input: RGB 224×224, normalisasi ImageNet (mean 0.485/0.456/0.406, std 0.229/0.224/0.225)
-- Kelas: `0 = real`, `1 = fake`
+- Kelas: `0 = Real`, `1 = AI-generated` (mengikuti `class_to_idx` pada checkpoint)
 - Metrik test: akurasi 98,48% · F1 0,9848 · AUC 0,9978
 
 ## Instalasi
@@ -13,8 +13,8 @@ Server FastAPI yang memuat `Swin-B/best.pt` dan menyediakan endpoint prediksi.
 pip install -r backend/requirements.txt
 ```
 
-Pastikan checkpoint ada di `Swin-B/best.pt` (tidak ikut repo karena 347 MB). Jika lokasinya
-berbeda, atur `MODEL_PATH`.
+Pastikan checkpoint ada di `Swin-B/checkpoint_best.pth` (file bobot besar diabaikan Git).
+Jika lokasinya berbeda, atur `MODEL_PATH`.
 
 ## Menjalankan server
 Dari root repo:
@@ -35,7 +35,7 @@ Dokumentasi interaktif: <http://127.0.0.1:8000/docs>
 ## Environment variable
 | Nama | Default | Keterangan |
 |---|---|---|
-| `MODEL_PATH` | `Swin-B/best.pt` | Lokasi checkpoint |
+| `MODEL_PATH` | `Swin-B/checkpoint_best.pth` | Lokasi checkpoint |
 | `DEVICE` | `cuda` bila tersedia | `cpu` atau `cuda` |
 | `FAKE_THRESHOLD` | `0.5` | Ambang `prob_fake` untuk label fake |
 | `MAX_UPLOAD_MB` | `10` | Batas ukuran upload |
@@ -73,7 +73,7 @@ curl.exe -X POST http://127.0.0.1:8000/predict -F "file=@contoh.jpg"
 
 ```json
 {
-  "label": "fake",
+  "label": "AI-generated",
   "confidence": 99.99,
   "prob_fake": 0.999912,
   "prob_real": 0.000088,
@@ -101,6 +101,6 @@ python backend/smoke_test.py
 
 ## Catatan
 - Model dimuat sekali saat startup; request pertama tidak memperhitungkan waktu load.
-- `torch.load(..., weights_only=True)` dipakai agar checkpoint tidak bisa mengeksekusi kode.
+- Checkpoint dibaca dengan `weights_only=False` untuk memuat konfigurasi training; gunakan hanya file checkpoint tepercaya.
 - Inferensi berjalan di thread terpisah (`asyncio.to_thread`) agar event loop tidak blocking.
 - Untuk deployment produksi, tambahkan autentikasi, rate limit, dan reverse proxy HTTPS.

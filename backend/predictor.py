@@ -4,28 +4,25 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import math
+import time
 
 from pathlib import Path
 from typing import Any
-
 
 import timm
 import torch
 from PIL import Image
 import torchvision.transforms as T
-from timm.data import resolve_data_config
+from timm.data import resolve_model_data_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL_PATH = REPO_ROOT / "Swin-B" / "best.pt"
+DEFAULT_MODEL_PATH = REPO_ROOT / "Swin-B" / "checkpoint_best.pth"
 RESULT_JSON_PATH = REPO_ROOT / "Swin-B" / "result.json"
 
 MODEL_NAME = "swin_base_patch4_window7_224.ms_in22k_ft_in1k"
 
-# Urutan kelas mengikuti dataset: indeks 0 = real, indeks 1 = fake.
-# Ini konsisten dengan kolom `prob_fake` pada Swin-B/test_predictions.csv.
-CLASS_NAMES = ("real", "fake")
+CLASS_NAMES = ("Real", "AI-generated")
 FAKE_INDEX = 1
 
 
@@ -67,9 +64,8 @@ class FakeImagePredictor:
         if not self.model_path.is_file():
             raise FileNotFoundError(
                 f"Checkpoint model tidak ditemukan di '{self.model_path}'. "
-                "Letakkan best.pt di folder Swin-B/ atau atur environment variable MODEL_PATH."
+                "Letakkan checkpoint_best.pth di folder Swin-B/ atau atur environment variable MODEL_PATH."
             )
-
 
         raw_threshold = (
             fake_threshold
@@ -91,41 +87,42 @@ class FakeImagePredictor:
             device or os.getenv("DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        self.class_names = CLASS_NAMES
         self.metadata = _read_model_metadata()
         best_epoch = self.metadata.get("best_epoch")
         self.version = f"swin-b-epoch{best_epoch}" if best_epoch else "swin-b"
 
         self.model = self._load_model()
+        class_to_idx = self.checkpoint.get("class_to_idx")
+        self.class_names = CLASS_NAMES
+        if class_to_idx is not None:
+            if not isinstance(class_to_idx, dict):
+                raise ValueError("class_to_idx pada checkpoint harus berupa dictionary.")
+            idx_to_class = {int(index): str(name) for name, index in class_to_idx.items()}
+            if set(idx_to_class) != {0, 1}:
+                raise ValueError("class_to_idx pada checkpoint harus memetakan dua kelas ke indeks 0 dan 1.")
+            self.class_names = (idx_to_class[0], idx_to_class[1])
 
-        # Mengambil mean dan std yang sama dengan konfigurasi training
-        dcfg = resolve_data_config({}, model=self.model)
-
-        # Menyamakan preprocessing dengan notebook training
+        data_config = resolve_model_data_config(self.model)
+        config = self.checkpoint.get("config") or {}
+        mean = config.get("pretrained_mean", data_config["mean"])
+        std = config.get("pretrained_std", data_config["std"])
         self.transform = T.Compose([
-            T.Resize(256),
-            T.CenterCrop(224),
+            T.Resize((224, 224)),
             T.ToTensor(),
-            T.Normalize(
-                mean=dcfg["mean"],
-                std=dcfg["std"]
-            )
+            T.Normalize(mean=mean, std=std),
         ])
 
     def _load_model(self) -> torch.nn.Module:
-        model = timm.create_model(
-            MODEL_NAME,
-            pretrained=False,
-            num_classes=len(self.class_names),
-            drop_path_rate=0.1
+        model = timm.create_model(MODEL_NAME, pretrained=False, num_classes=2)
+        self.checkpoint = torch.load(
+            self.model_path, map_location=self.device, weights_only=False
         )
-
-        # weights_only=True: hanya tensor yang diizinkan, aman dari eksekusi kode
-        # saat checkpoint berasal dari sumber tidak tepercaya.
-        state_dict = torch.load(
-            self.model_path, map_location="cpu", weights_only=True
+        state_dict = (
+            self.checkpoint["model_state_dict"]
+            if "model_state_dict" in self.checkpoint
+            else self.checkpoint
         )
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict)
         model.to(self.device)
         model.eval()
         return model
@@ -134,19 +131,30 @@ class FakeImagePredictor:
         """Jalankan model pada satu gambar dan kembalikan hasil terstruktur."""
         tensor = self.transform(image.convert("RGB")).unsqueeze(0).to(self.device)
 
-        started = time.perf_counter()
         use_amp = self.device.type == "cuda"
-        amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
-
-        with torch.inference_mode(), torch.autocast(device_type=self.device.type, dtype=amp_dtype, enabled=use_amp):
-            logits = self.model(tensor)
-            probabilities = torch.softmax(logits.float(), dim=1)[0]
+        amp_dtype = (
+            torch.bfloat16
+            if use_amp and torch.cuda.is_bf16_supported()
+            else torch.float16
+        )
+        if use_amp:
+            torch.cuda.synchronize(self.device)
+        started = time.perf_counter()
+        with torch.no_grad():
+            with torch.autocast(
+                device_type=self.device.type, dtype=amp_dtype, enabled=use_amp
+            ):
+                logits = self.model(tensor)
+                probabilities = torch.softmax(logits.float(), dim=1)[0]
+        if use_amp:
+            torch.cuda.synchronize(self.device)
         elapsed_ms = (time.perf_counter() - started) * 1000
 
         prob_fake = float(probabilities[FAKE_INDEX])
         prob_real = 1.0 - prob_fake
-        label = "fake" if prob_fake >= self.fake_threshold else "real"
-        confidence = prob_fake if label == "fake" else prob_real
+        class_index = FAKE_INDEX if prob_fake >= self.fake_threshold else 0
+        label = self.class_names[class_index]
+        confidence = float(probabilities[class_index])
 
         return {
             "label": label,
@@ -168,6 +176,9 @@ class FakeImagePredictor:
             "checkpoint": str(self.model_path),
             "checkpoint_size_mb": round(self.model_path.stat().st_size / (1024 * 1024), 1),
             "fake_threshold": self.fake_threshold,
+            "class_to_idx": {
+                name: index for index, name in enumerate(self.class_names)
+            },
             "val_accuracy": self.metadata.get("val_accuracy"),
             "test_accuracy": self.metadata.get("test_accuracy"),
             "test_f1": self.metadata.get("test_f1"),
