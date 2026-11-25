@@ -14,38 +14,20 @@ import timm
 import torch
 from PIL import Image
 import torchvision.transforms as T
-from timm.data import resolve_model_data_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL_PATH = REPO_ROOT / "Swin-B" / "checkpoint_best.pth"
-RESULT_JSON_PATH = REPO_ROOT / "Swin-B" / "result.json"
-
-MODEL_NAME = "swin_base_patch4_window7_224.ms_in22k_ft_in1k"
-
-CLASS_NAMES = ("Real", "AI-generated")
-FAKE_INDEX = 1
+SWIN_B_DIR = REPO_ROOT / "Swin-B"
+DEFAULT_MODEL_PATH = SWIN_B_DIR / "swin_base_best_weights.pth"
+INFERENCE_CONFIG_PATH = SWIN_B_DIR / "model_inference_config.json"
+TEST_METRICS_PATH = SWIN_B_DIR / "test_metrics.json"
 
 
-def _read_model_metadata() -> dict[str, Any]:
-    """Ambil ringkasan training (epoch terbaik, akurasi) bila result.json tersedia."""
-    if not RESULT_JSON_PATH.is_file():
-        return {}
-
-    try:
-        with RESULT_JSON_PATH.open(encoding="utf-8") as file:
-            data = json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-    return {
-        "model": data.get("model", "Swin-B"),
-        "params_M": data.get("params_M"),
-        "best_epoch": data.get("best_epoch"),
-        "val_accuracy": (data.get("val") or {}).get("Accuracy"),
-        "test_accuracy": (data.get("test") or {}).get("Accuracy"),
-        "test_f1": (data.get("test") or {}).get("F1"),
-        "test_auc": (data.get("test") or {}).get("AUC"),
-    }
+def _read_json(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, dict):
+        raise ValueError(f"Konfigurasi '{path}' harus berupa objek JSON.")
+    return data
 
 
 class FakeImagePredictor:
@@ -63,9 +45,32 @@ class FakeImagePredictor:
 
         if not self.model_path.is_file():
             raise FileNotFoundError(
-                f"Checkpoint model tidak ditemukan di '{self.model_path}'. "
-                "Letakkan checkpoint_best.pth di folder Swin-B/ atau atur environment variable MODEL_PATH."
+                f"Bobot model tidak ditemukan di '{self.model_path}'. "
+                "Pastikan swin_base_best_weights.pth tersedia di folder Swin-B/ "
+                "atau atur environment variable MODEL_PATH."
             )
+
+        self.inference_config = _read_json(INFERENCE_CONFIG_PATH)
+        self.model_name = self.inference_config["model_name"]
+        self.image_size = self.inference_config["image_size"]
+        self.label_to_id = self.inference_config["label_to_id"]
+        if (
+            not isinstance(self.image_size, int)
+            or self.image_size <= 0
+            or not isinstance(self.label_to_id, dict)
+            or set(self.label_to_id) != {"Real", "AI-generated"}
+            or set(self.label_to_id.values()) != {0, 1}
+            or set(self.inference_config["class_names"]) != set(self.label_to_id)
+        ):
+            raise ValueError(
+                "model_inference_config.json memiliki konfigurasi kelas/input yang tidak valid."
+            )
+        self.class_names = tuple(
+            name
+            for name, _ in sorted(self.label_to_id.items(), key=lambda item: item[1])
+        )
+        self.real_index = self.label_to_id["Real"]
+        self.fake_index = self.label_to_id["AI-generated"]
 
         raw_threshold = (
             fake_threshold
@@ -87,36 +92,32 @@ class FakeImagePredictor:
             device or os.getenv("DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        self.metadata = _read_model_metadata()
-        best_epoch = self.metadata.get("best_epoch")
-        self.version = f"swin-b-epoch{best_epoch}" if best_epoch else "swin-b"
+        self.test_metrics = _read_json(TEST_METRICS_PATH)
+        self.version = "swin-b"
 
         self.model = self._load_model()
-        class_to_idx = self.checkpoint.get("class_to_idx")
-        self.class_names = CLASS_NAMES
-        if class_to_idx is not None:
-            if not isinstance(class_to_idx, dict):
-                raise ValueError("class_to_idx pada checkpoint harus berupa dictionary.")
-            idx_to_class = {int(index): str(name) for name, index in class_to_idx.items()}
-            if set(idx_to_class) != {0, 1}:
-                raise ValueError("class_to_idx pada checkpoint harus memetakan dua kelas ke indeks 0 dan 1.")
-            self.class_names = (idx_to_class[0], idx_to_class[1])
-
-        data_config = resolve_model_data_config(self.model)
-        config = self.checkpoint.get("config") or {}
-        mean = config.get("pretrained_mean", data_config["mean"])
-        std = config.get("pretrained_std", data_config["std"])
         self.transform = T.Compose([
-            T.Resize((224, 224)),
+            T.Resize((self.image_size, self.image_size)),
             T.ToTensor(),
-            T.Normalize(mean=mean, std=std),
+            T.Normalize(
+                mean=self.inference_config["mean"],
+                std=self.inference_config["std"],
+            ),
         ])
 
     def _load_model(self) -> torch.nn.Module:
-        model = timm.create_model(MODEL_NAME, pretrained=False, num_classes=2)
-        self.checkpoint = torch.load(
-            self.model_path, map_location=self.device, weights_only=False
+        model = timm.create_model(
+            self.model_name,
+            pretrained=False,
+            num_classes=len(self.class_names),
         )
+        self.checkpoint = torch.load(
+            self.model_path,
+            map_location=self.device,
+            weights_only=True,
+        )
+        if not isinstance(self.checkpoint, dict):
+            raise ValueError("Checkpoint model harus berisi state_dict.")
         state_dict = (
             self.checkpoint["model_state_dict"]
             if "model_state_dict" in self.checkpoint
@@ -150,9 +151,11 @@ class FakeImagePredictor:
             torch.cuda.synchronize(self.device)
         elapsed_ms = (time.perf_counter() - started) * 1000
 
-        prob_fake = float(probabilities[FAKE_INDEX])
-        prob_real = 1.0 - prob_fake
-        class_index = FAKE_INDEX if prob_fake >= self.fake_threshold else 0
+        prob_fake = float(probabilities[self.fake_index])
+        prob_real = float(probabilities[self.real_index])
+        class_index = (
+            self.fake_index if prob_fake >= self.fake_threshold else self.real_index
+        )
         label = self.class_names[class_index]
         confidence = float(probabilities[class_index])
 
@@ -168,19 +171,22 @@ class FakeImagePredictor:
 
     def info(self) -> dict[str, Any]:
         return {
-            "name": self.metadata.get("model", "Swin-B"),
-            "architecture": MODEL_NAME,
+            "name": "Swin-B",
+            "architecture": self.model_name,
             "version": self.version,
-            "params_M": self.metadata.get("params_M"),
             "device": str(self.device),
             "checkpoint": str(self.model_path),
-            "checkpoint_size_mb": round(self.model_path.stat().st_size / (1024 * 1024), 1),
+            "checkpoint_size_mb": round(
+                self.model_path.stat().st_size / (1024 * 1024), 1
+            ),
             "fake_threshold": self.fake_threshold,
             "class_to_idx": {
                 name: index for index, name in enumerate(self.class_names)
             },
-            "val_accuracy": self.metadata.get("val_accuracy"),
-            "test_accuracy": self.metadata.get("test_accuracy"),
-            "test_f1": self.metadata.get("test_f1"),
-            "test_auc": self.metadata.get("test_auc"),
+            "test_loss": self.test_metrics.get("loss"),
+            "test_accuracy": self.test_metrics.get("accuracy"),
+            "test_precision": self.test_metrics.get("precision"),
+            "test_recall": self.test_metrics.get("recall"),
+            "test_f1": self.test_metrics.get("f1"),
+            "test_auc": self.test_metrics.get("auc"),
         }
