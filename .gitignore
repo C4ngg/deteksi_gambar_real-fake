@@ -1,4 +1,5 @@
 Swin-B/
+*.ipynb
 
 # Python
 __pycache__/
